@@ -1,0 +1,272 @@
+/*****  === FACTUURGENERATOR (Docs + PDF) ===  *****/
+const SESSION_TZ       = Session.getScriptTimeZone() || 'Europe/Amsterdam';
+
+// <<< IDs invullen >>>
+const DEST_FOLDER_ID   = '1Yk2mg9KnJvNuHCZ8_rewaxviiJ58LkjY';
+const TEMPLATE_DOC_ID  = '12jcVCVShJT6QtQvPGBkcoRuBsq3xm7PrSyBk4zNDKZs';
+
+/********** MENU **********/
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Facturen')
+    .addItem('Genereer factuur → Docs + PDF', 'makeInvoiceFromTemplate')
+    .addToUi();
+}
+
+/********** ENTRYPOINT **********/
+function makeInvoiceFromTemplate() {
+  const ss  = SpreadsheetApp.getActive();
+  const sh  = ss.getSheetByName('D) Facturatie');
+  if (!sh) throw new Error('Tab "D) Facturatie" niet gevonden');
+
+  // hoofdvelden uit Facturatie
+  const klantNaam    = trim_(sh.getRange('B1').getDisplayValue());
+  const contactSheet = trim_(sh.getRange('B2').getDisplayValue());
+  const poSheet      = trim_(sh.getRange('B3').getDisplayValue());
+  const periode      = trim_(sh.getRange('B4').getDisplayValue());
+  const btwPercent   = toNumber_(sh.getRange('B5').getDisplayValue());
+
+  if (!klantNaam) throw new Error('Klant (Facturatie!B1) is leeg');
+  if (!periode)   throw new Error('Periode (Facturatie!B4) is leeg');
+
+  // regels lezen uit samengevat blok: A=Categorie(=Omschrijving), B=Uren, C=Bedrag excl.
+  const lastRow = sh.getLastRow();
+  const raw     = sh.getRange(9, 1, Math.max(0, lastRow - 8), 3).getValues(); // A..C
+  const items   = [];
+  raw.forEach(r => {
+    const categorie = trim_(r[0]);
+    const uren      = typeof r[1] === 'number' ? r[1] : toNumber_(r[1]);
+    const excl      = typeof r[2] === 'number' ? r[2] : toNumber_(r[2]);
+    if (categorie) {
+      items.push({
+        datum: null,
+        omschrijving: categorie,
+        uren: uren || 0,
+        excl: excl || 0
+      });
+    }
+  });
+  if (!items.length) throw new Error('Geen regels (A9:C) gevonden in tab "D) Facturatie"');
+
+  // bedrijfs- en klantgegevens
+  const bedrijf = readBedrijfsgegevens_();
+  const ki      = readKlantInfo_(klantNaam);
+  const contact = contactSheet || ki.contactpersoon || '';
+  const poNummer = poSheet || 'n.v.t.';
+  const uurTarief = toNumber_(ki.uurtarief);
+  const klantAdres = ki.adresRegel || '';
+
+  // ontbrekende excl alleen vullen indien uren aanwezig zijn
+  if (uurTarief) {
+    items.forEach(it => {
+      if (!it.excl && it.uren) it.excl = round2_(it.uren * uurTarief);
+    });
+  }
+
+  // totals
+  const subTotaal = items.reduce((s, it) => s + (it.excl || 0), 0);
+  const btwBedrag = round2_(subTotaal * (btwPercent / 100));
+  const totaal    = round2_(subTotaal + btwBedrag);
+
+  // document maken
+  const destFolder = DriveApp.getFolderById(DEST_FOLDER_ID);
+  const tmplFile   = DriveApp.getFileById(TEMPLATE_DOC_ID);
+  const factNr     = nextInvoiceNumber_();
+  const factDatum  = Utilities.formatDate(new Date(), SESSION_TZ, 'dd-MM-yyyy');
+
+  const docName = `Factuur ${factNr} - ${klantNaam} - ${periode}`;
+  const newFile = tmplFile.makeCopy(docName, destFolder);
+  const doc     = DocumentApp.openById(newFile.getId());
+  const body    = doc.getBody();
+
+  // placeholders
+  const replace = {
+    '{{BEDRIJFSNAAM}}':     bedrijf.BEDRIJFSNAAM,
+    '{{FACTUURDATUM}}':     factDatum,
+    '{{FACTUURNUMMER}}':    factNr,
+
+    '{{KLANT_NAAM}}':       klantNaam,
+    '{{KLANT_ADRES}}':      klantAdres,
+
+    '{{CONTACTPERSOON}}':   contact,
+    '{{PO_NUMMER}}':        poNummer,
+    '{{PERIODE}}':          periode,
+    '{{UURTARIEF}}':        uurTarief ? euro_(uurTarief) : '',
+
+    '{{SUBTOTAAL}}':        euro_(subTotaal),
+    '{{BTW_PERCENT}}':      `${btwPercent}%`,
+    '{{BTW_BEDRAG}}':       euro_(btwBedrag),
+    '{{TOTAAL}}':           euro_(totaal),
+
+    '{{IBAN}}':             bedrijf.IBAN,
+    '{{KVK}}':              bedrijf.KVK,
+    '{{BTWID}}':            bedrijf.BTWID,
+    '{{PLAATS_OPMAAK}}':    bedrijf.PLAATS_OPMAAK,
+    '{{BETALINGSTERMIJN}}': bedrijf.BETALINGSTERMIJN
+  };
+  replaceText_(body, replace);
+
+  // tabel: 3 kolommen (geen datum)
+  const header = ['Omschrijving','Uren','Bedrag excl. btw'];
+  const rows = [header].concat(
+    items.map(it => ([
+      it.omschrijving,
+      numberStr_(it.uren),
+      euro_(it.excl)
+    ]))
+  );
+  insertItemsTable_(doc, rows);
+
+  doc.saveAndClose();
+
+  // PDF
+  const pdfBlob = DriveApp.getFileById(newFile.getId()).getAs('application/pdf');
+  const pdf     = destFolder.createFile(pdfBlob).setName(docName + '.pdf');
+
+  // betaaltermijn (dagen)
+  const betaaltermijnDagen = readBetalingstermijnDays_() || parseDays_(bedrijf.BETALINGSTERMIJN);
+
+  // log
+  logInvoice_(ss, {
+    nummer: factNr,
+    klant: klantNaam,
+    periode: periode,
+    datum: new Date(),
+    subtotal: subTotaal,
+    btw: btwBedrag,
+    totaal: totaal,
+    docId: newFile.getId(),
+    docUrl: `https://docs.google.com/document/d/${newFile.getId()}/edit`,
+    pdfId: pdf.getId(),
+    pdfUrl: pdf.getUrl(),
+    betaaltermijnDagen: betaaltermijnDagen
+  });
+
+  SpreadsheetApp.getUi().alert(`Factuur aangemaakt:\n\nNummer: ${factNr}\nPDF: ${pdf.getUrl()}`);
+}
+
+/********** HELPERS **********/
+
+function insertItemsTable_(doc, rows) {
+  const body = doc.getBody();
+  const MARKERS = ['{{ITEM_TABEL}}', '{{ITEM_TABLE}}'];
+  let paraIndex = -1, markerParagraph = null;
+
+  for (let i = 0; i < body.getNumChildren(); i++) {
+    const el = body.getChild(i);
+    if (el.getType() === DocumentApp.ElementType.PARAGRAPH) {
+      const p = el.asParagraph();
+      if (MARKERS.includes((p.getText() || '').trim())) { paraIndex = i; markerParagraph = p; break; }
+    }
+  }
+  if (paraIndex === -1) throw new Error('Marker {{ITEM_TABEL}} niet gevonden (zet op eigen regel)');
+
+  const table = body.insertTable(paraIndex, rows);
+  if (rows.length) table.getRow(0).editAsText().setBold(true);
+  table.setBorderWidth(0);
+  body.removeChild(markerParagraph);
+}
+
+function readBedrijfsgegevens_() {
+  const sh = SpreadsheetApp.getActive().getSheetByName('Bedrijfsgegevens');
+  if (!sh) throw new Error('Tab "Bedrijfsgegevens" niet gevonden');
+  const map = keyValueMap_(sh);
+  return {
+    BEDRIJFSNAAM:      map['Bedrijfsnaam']      || '',
+    PLAATS_OPMAAK:     map['Bedrijfslocatie']   || '',
+    KVK:               map['Kvk']               || '',
+    BTWID:             map['BTW-id']            || '',
+    IBAN:              map['IBAN']              || '',
+    BETALINGSTERMIJN:  map['Betalingstermijn']  || ''
+  };
+}
+
+// Klanten: A=Naam, B=Straat, C=Postcode+Plaats, D=Uurtarief, E=Contactpersoon, F=PO
+function readKlantInfo_(klantNaam) {
+  const sh = SpreadsheetApp.getActive().getSheetByName('Klanten');
+  if (!sh) return {contactpersoon:'', uurtarief:'', po:'', adresRegel:''};
+  const vals = sh.getRange(2,1,Math.max(0, sh.getLastRow()-1), 6).getValues();
+  for (const r of vals) {
+    if (trim_(r[0]) === klantNaam) {
+      const straat = trim_(r[1]) || '';
+      const pcpl  = trim_(r[2]) || '';
+      return {
+        uurtarief: toNumber_(r[3]),
+        contactpersoon: trim_(r[4]) || '',
+        po: trim_(r[5]) || '',
+        adresRegel: [straat, pcpl].filter(Boolean).join('\n')
+      };
+    }
+  }
+  return {contactpersoon:'', uurtarief:'', po:'', adresRegel:''};
+}
+
+function keyValueMap_(sh){
+  const out = {}; const last = sh.getLastRow(); if (last < 1) return out;
+  sh.getRange(1,1,last,2).getValues().forEach(r => { const k=trim_(r[0]); const v=trim_(r[1]); if(k) out[k]=v; });
+  return out;
+}
+function replaceText_(body, kv){ Object.keys(kv).forEach(k => body.replaceText(escapeForFind_(k), kv[k])); }
+function escapeForFind_(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function euro_(n){ if (typeof n!=='number') n=Number(n)||0; const s=Utilities.formatString('%.2f',n); const [i,d]=s.split('.'); return '€ '+i.replace(/\B(?=(\d{3})+(?!\d))/g,'.')+','+d; }
+function numberStr_(n){ if (n==null||isNaN(n)) return '0'; const s=Utilities.formatString('%.2f',Number(n)).replace('.',','); return s.replace(/,00$/,',0'); }
+function toNumber_(v){ if (typeof v==='number') return v; if (!v) return 0; v=String(v).replace(/\./g,'').replace(',','.'); const n=Number(v); return isNaN(n)?0:n; }
+function trim_(s){ return (s==null)?'':String(s).trim(); }
+function round2_(n){ return Math.round((n+Number.EPSILON)*100)/100; }
+
+function parseDays_(s) {
+  const m = String(s || '').match(/\d+/);
+  return m ? Number(m[0]) : 0;
+}
+
+function readBetalingstermijnDays_() {
+  const sh = SpreadsheetApp.getActive().getSheetByName('Bedrijfsgegevens');
+  if (!sh) return 0;
+  const v = sh.getRange('B6').getDisplayValue();
+  return parseDays_(v);
+}
+
+function getLogSheet_() {
+  const ss = SpreadsheetApp.getActive();
+  return ss.getSheetByName('Facturen_log')
+      || ss.getSheetByName('factuur-log')
+      || ss.insertSheet('Facturen_log');
+}
+
+function nextInvoiceNumber_(){
+  const sh = getLogSheet_();
+  if (sh.getLastRow()===0) {
+    sh.getRange(1,1,1,10).setValues([[
+      'Factuurnummer','Datum','Klant','Periode','Subtotaal','BTW','Totaal','Doc URL','PDF URL','Betaaltermijn (dagen)'
+    ]]);
+  }
+  const year=new Date().getFullYear(); const rows=sh.getLastRow(); let seq=0;
+  if (rows>1){
+    sh.getRange(2,1,rows-1,1).getValues().flat().forEach(v=>{
+      const m=String(v||'').match(/^(\d{4})-(\d{4})$/);
+      if(m&&Number(m[1])===year) seq=Math.max(seq,Number(m[2]));
+    });
+  }
+  return `${year}-${String(++seq).padStart(4,'0')}`;
+}
+
+function logInvoice_(ss,row){
+  const sh = getLogSheet_();
+  if (sh.getLastRow()===0) {
+    sh.getRange(1,1,1,10).setValues([[
+      'Factuurnummer','Datum','Klant','Periode','Subtotaal','BTW','Totaal','Doc URL','PDF URL','Betaaltermijn (dagen)'
+    ]]);
+  }
+  sh.appendRow([
+    row.nummer,
+    row.datum,
+    row.klant,
+    row.periode,
+    row.subtotal,
+    row.btw,
+    row.totaal,
+    row.docUrl,
+    row.pdfUrl,
+    row.betaaltermijnDagen
+  ]);
+}
