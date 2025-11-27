@@ -1,0 +1,245 @@
+/*****************************************************
+ * VASTE LASTEN ← ABONNEMENTEN (v4)
+ * - Gebruikt START–EIND + FREQUENTIE (maand/kwartaal/jaar)
+ * - Negeert 'Vervaldatum' in Abonnementen!C
+ * - Houdt rijen uniek op sleutel: datum|leverancier|omschrijving|incl
+ * - Optionele cleanup van rijen buiten periode
+ * - Herstelt formules in B2, C2, F2, G2 en vult ze door
+ * - Sorteert op datum
+ *****************************************************/
+
+const CLEANUP_OUTSIDE_RANGE = true;   // zet op false als je nooit wilt opruimen
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Automatisering')
+    .addItem('Synchroniseer vaste lasten (volledig)', 'syncRecurringExpensesFull')
+    .addItem('Preview vaste lasten (volledig)', 'previewRecurringExpensesFull')
+    .addToUi();
+}
+
+/** Hoofdfunctie: synchroniseer alles */
+function syncRecurringExpensesFull() {
+  const ss  = SpreadsheetApp.getActive();
+  const src = ss.getSheetByName('Abonnementen');   // A..I
+  const dst = ss.getSheetByName('Vaste lasten');   // A..J
+  if (!src || !dst) throw new Error('Tabbladen "Abonnementen" en/of "Vaste lasten" niet gevonden.');
+
+  const tz = Session.getScriptTimeZone() || 'Europe/Amsterdam';
+
+  // lees abonnementen
+  const sr = src.getLastRow();
+  const subs = sr > 1 ? src.getRange(2,1, sr-1, 9).getValues() : []; // A..I
+
+  // lees bestaande vaste lasten
+  const dr = dst.getLastRow();
+  const existingRows = dr > 1 ? dst.getRange(2,1, dr-1, 10).getValues() : [];
+
+  // set met bestaande sleutels: datum|lev|oms|incl
+  const existingSet = new Set(
+    existingRows
+      .filter(r => r[0] && r[4] && r[3])
+      .map(r => [fmtDate_(r[0], tz), String(r[4]).trim(), String(r[3]).trim(), String(r[7]).trim()].join('|'))
+  );
+
+  // map voor gerichte cleanup
+  const dstRowMap = [];
+  existingRows.forEach((r,i) => {
+    dstRowMap.push({
+      rowNum: i+2,
+      dateStr: r[0] ? fmtDate_(r[0], tz) : '',
+      lev: String(r[4]||'').trim(),
+      oms: String(r[3]||'').trim()
+    });
+  });
+
+  const toAppend = [];
+  const toDeleteRowNums = [];
+
+  // helper: hoeveel maanden per stap?
+  const stepMonths = (freq) => {
+    const f = String(freq).toLowerCase();
+    if (f.startsWith('maand'))   return 1;
+    if (f.startsWith('kwartaal'))return 3;
+    return 12; // jaarlijks
+  };
+
+  subs.forEach(r => {
+    const [lev, oms, _verval, incl, type, freq, start, end, actief] = r;
+
+    // actief? (accepteert Ja/Actief/Yes/True/Aan/1)
+    const isActive = ['ja','actief','yes','true','aan','1'].includes(String(actief).trim().toLowerCase());
+    if (!isActive) return;
+
+    if (!incl || !type || !freq || !(start instanceof Date) || !(end instanceof Date)) return;
+
+    const step = stepMonths(freq);
+
+    // normaliseer datums
+    const s = new Date(start); s.setHours(0,0,0,0);
+    const e = new Date(end);   e.setHours(0,0,0,0);
+
+    // alle vervaldatums binnen s..e (inclusief)
+    let d = new Date(s);
+    const expected = new Set();
+    while (d <= e) {
+      const dStr = fmtDate_(d, tz);
+      expected.add(dStr);
+
+      const key = [dStr, String(lev).trim(), String(oms).trim(), String(incl).trim()].join('|');
+      if (!existingSet.has(key)) {
+        // A=Datum, B=Periode (formule), C=Kwartaalcode (formule), D=Omschr, E=Lev, F=Excl (formule), G=BTW (formule), H=Incl, I=Freq, J=Type
+        toAppend.push([new Date(d), '', '', String(oms), String(lev), '', '', incl, freq, type]);
+        existingSet.add(key);
+      }
+      d = addMonths_(d, step);
+    }
+
+    // cleanup: rijen met zelfde (lev|oms) maar datum buiten s..e of niet op verwacht interval
+    if (CLEANUP_OUTSIDE_RANGE) {
+      dstRowMap.forEach(row => {
+        if (row.lev === String(lev).trim() && row.oms === String(oms).trim()) {
+          const dt = parseDate_(row.dateStr);
+          if (!dt) return;
+          const inRange = dt >= s && dt <= e;
+          const isExpected = expected.has(row.dateStr);
+          if (!inRange || (inRange && !isExpected)) {
+            toDeleteRowNums.push(row.rowNum);
+          }
+        }
+      });
+    }
+  });
+
+  // eerst verwijderen (van onder naar boven)
+  if (toDeleteRowNums.length) {
+    toDeleteRowNums.sort((a,b) => b - a).forEach(rn => dst.deleteRow(rn));
+  }
+
+  // dan toevoegen
+  if (toAppend.length) {
+    const startRow = Math.max(2, dst.getLastRow()+1);
+    dst.getRange(startRow, 1, toAppend.length, toAppend[0].length).setValues(toAppend);
+  }
+
+  // formules (B2, C2, F2, G2) terugzetten & doorvullen
+  ensureFormulas_(dst);
+
+  // sorteer op datum (A), tie-breaker Leverancier (E), Omschrijving (D)
+  autoSortByDate_(dst);
+
+  SpreadsheetApp.getUi().alert(
+    `Klaar.\nToegevoegd: ${toAppend.length}\nVerwijderd: ${toDeleteRowNums.length}`
+  );
+}
+
+/** Voorbeeld/controle zonder schrijven */
+function previewRecurringExpensesFull() {
+  const ss  = SpreadsheetApp.getActive();
+  const src = ss.getSheetByName('Abonnementen');
+  const dst = ss.getSheetByName('Vaste lasten');
+  if (!src || !dst) throw new Error('Tabbladen ontbreken.');
+
+  const tz = Session.getScriptTimeZone() || 'Europe/Amsterdam';
+
+  const sr  = src.getLastRow();
+  const subs = sr > 1 ? src.getRange(2,1,sr-1,9).getValues() : [];
+
+  const dr = dst.getLastRow();
+  const existingRows = dr > 1 ? dst.getRange(2,1,dr-1,10).getValues() : [];
+  const existing = new Set(
+    existingRows.filter(r => r[0] && r[4] && r[3])
+      .map(r => [fmtDate_(r[0], tz), String(r[4]).trim(), String(r[3]).trim(), String(r[7]).trim()].join('|'))
+  );
+
+  const out = [['Datum','Omschrijving','Leverancier','Incl.','Frequentie','Type','Actie']];
+  const stepMonths = (f) => {
+    const s = String(f).toLowerCase();
+    if (s.startsWith('maand')) return 1;
+    if (s.startsWith('kwartaal')) return 3;
+    return 12;
+  };
+
+  subs.forEach(r => {
+    const [lev, oms, _v, incl, type, freq, start, end, actief] = r;
+    const isActive = ['ja','actief','yes','true','aan','1'].includes(String(actief).trim().toLowerCase());
+    if (!isActive || !incl || !type || !freq || !(start instanceof Date) || !(end instanceof Date)) return;
+
+    let d = new Date(start); d.setHours(0,0,0,0);
+    const e = new Date(end); e.setHours(0,0,0,0);
+    const step = stepMonths(freq);
+
+    while (d <= e) {
+      const key = [fmtDate_(d, tz), String(lev).trim(), String(oms).trim(), String(incl).trim()].join('|');
+      const action = existing.has(key) ? 'Bestaat' : 'Toevoegen';
+      out.push([new Date(d), String(oms), String(lev), incl, freq, type, action]);
+      d = addMonths_(d, step);
+    }
+  });
+
+  const prev = ss.getSheetByName('Preview vaste lasten') || ss.insertSheet('Preview vaste lasten');
+  prev.clear();
+  prev.getRange(1,1,out.length,out[0].length).setValues(out);
+  prev.autoResizeColumns(1,out[0].length);
+  SpreadsheetApp.getUi().alert(out.length>1 ? `Preview: ${out.length-1} regels` : 'Geen actieve abonnementen met geldige datums gevonden.');
+}
+
+/* =================== Helpers =================== */
+
+function addMonths_(date, m){ const d = new Date(date); d.setMonth(d.getMonth()+m); return d; }
+function fmtDate_(d, tz){ return Utilities.formatDate(new Date(d), tz, 'yyyy-MM-dd'); }
+function parseDate_(s){ const p = s.split('-'); if (p.length!==3) return null; return new Date(Number(p[0]), Number(p[1])-1, Number(p[2])); }
+
+function autoSortByDate_(sheet) {
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow <= 2) return;
+  sheet.getRange(2, 1, lastRow - 1, lastCol)
+       .sort([{column: 1, ascending: true}, {column: 5, ascending: true}, {column: 4, ascending: true}]);
+}
+
+/** Zet kolomformules terug en vult ze door tot de laatste rij */
+function ensureFormulas_(dst) {
+  const lastRow = dst.getLastRow();
+  if (lastRow < 2) return;
+
+  // B2: Periode (maand-jaar)
+  dst.getRange('B2').setFormula('=IF(A2="";"";TEXT(A2;"mmmm-yyyy"))');
+
+  // C2: Kwartaalcode (Qn-YYYY)
+  dst.getRange('C2').setFormula('=IF(A2="";"";"Q"&ROUNDUP(MONTH(A2)/3;0)&"-"&YEAR(A2))');
+
+  // F2: Bedrag Excl. BTW (afhankelijk van Type belasting in J)
+  dst.getRange('F2').setFormula(
+    '=IF(A2="";"";IFS(J2="Binnenland 21%";ROUND(H2/1,21;2);J2="Binnenland 9%";ROUND(H2/1,09;2);J2="Binnenland 0%";H2;J2="EU verlegd";H2;J2="Buiten EU";H2;TRUE;H2))'
+  );
+
+  // G2: BTW (alleen NL-tarieven)
+  dst.getRange('G2').setFormula(
+    '=IF(A2="";"";IFS(J2="Binnenland 21%";ROUND(H2-F2;2);J2="Binnenland 9%";ROUND(H2-F2;2);TRUE;0))'
+  );
+
+  // doorvullen tot laatste rij met data
+  if (lastRow > 2) {
+    dst.getRange(2,2,lastRow-1,1).autoFill(dst.getRange(2,2,lastRow-1,1), SpreadsheetApp.AutoFillSeries.DEFAULT_SERIES);
+    dst.getRange(2,3,lastRow-1,1).autoFill(dst.getRange(2,3,lastRow-1,1), SpreadsheetApp.AutoFillSeries.DEFAULT_SERIES);
+    dst.getRange(2,6,lastRow-1,1).autoFill(dst.getRange(2,6,lastRow-1,1), SpreadsheetApp.AutoFillSeries.DEFAULT_SERIES);
+    dst.getRange(2,7,lastRow-1,1).autoFill(dst.getRange(2,7,lastRow-1,1), SpreadsheetApp.AutoFillSeries.DEFAULT_SERIES);
+  }
+}
+
+/* ========== (optioneel) Tijdgestuurde trigger ========== */
+/** Roep dit één keer handmatig aan om een maandelijkse trigger te plaatsen. */
+function installMonthlyTrigger() {
+  // verwijder bestaande triggers naar deze functie
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'syncRecurringExpensesFull') ScriptApp.deleteTrigger(t);
+  });
+  // elke maand, op dag 1 om 06:30
+  ScriptApp.newTrigger('syncRecurringExpensesFull')
+    .timeBased()
+    .onMonthDay(1)
+    .atHour(6)
+    .nearMinute(30)
+    .create();
+}
