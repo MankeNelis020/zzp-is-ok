@@ -1,7 +1,7 @@
 /***** ZZP-uren – Sheets ↔ Calendar Sync (incrementeel + veilig) *****/
 
 const TIMEZONE = 'Europe/Amsterdam';
-const SHEET_NAME = 'ZZP-uren';
+const SHEET_NAME = 'B) Administratie';
 const ADMIN_SHEET_NAME = 'Administratie';
 
 const HEADER = {
@@ -261,7 +261,7 @@ function syncRow(sheet, row, headers, options) {
   const duurUrenRaw  = getCell(sheet, row, headers[HEADER.duurUren]);
   const status       = getCell(sheet, row, headers[HEADER.status]);
   const notities     = getCell(sheet, row, headers[HEADER.notities]);
-  let existingEventId = getCell(sheet, row, headers[HEADER.eventId]);
+  const existingEventId = getCell(sheet, row, headers[HEADER.eventId]);
   const reminderDaysOverride = getCell(sheet, row, headers[HEADER.reminderDays]);
   const doneVal      = getCell(sheet, row, headers[HEADER.doneFlag]);
   const cancelledVal = getCell(sheet, row, headers[HEADER.cancelledFlag]);
@@ -296,8 +296,6 @@ function syncRow(sheet, row, headers, options) {
     isDone ||
     isCancelled ||
     DELETE_KEYWORDS.some(k => statusStr.includes(k));
-
-  existingEventId = ensureUniqueEventLink_(sheet, headers, row, existingEventId);
 
   if (shouldDelete) {
     if (existingEventId) {
@@ -341,22 +339,37 @@ function syncRow(sheet, row, headers, options) {
     ? [customDay]
     : DEFAULT_REMINDERS_DAYS.slice();
 
-  let ev = existingEventId ? getEventSafe(cal, existingEventId) : null;
+  // --- 1 rij = 1 event logica ---
 
-  if (existingEventId && !ev) {
-    setCell(sheet, row, headers[HEADER.eventId], '');
-    existingEventId = '';
+  let ev = null;
+
+  if (existingEventId) {
+    // Probeer ALTIJD eerst het gekoppelde event op te halen
+    ev = getEventSafe(cal, existingEventId);
+
+    if (!ev) {
+      // Het event bestaat niet meer (bv. handmatig verwijderd of andere agenda):
+      // -> koppel los in de sheet en beschouw dit als "deleted"
+      setCell(sheet, row, headers[HEADER.eventId], '');
+      return 'deleted'; // NIET automatisch opnieuw aanmaken
+    }
   }
 
-  if (!ev) {
+  if (!existingEventId) {
+    // Nieuwe rij zonder koppeling -> nieuw event aanmaken
     ev = cal.createEvent(title, start, end, { description });
     setReminders(ev, reminderDays, true);
     setCell(sheet, row, headers[HEADER.eventId], ev.getId());
+
     if (headers[HEADER.calendarIdUsed]) {
       try { setCell(sheet, row, headers[HEADER.calendarIdUsed], cal.getId()); } catch (_) {}
     }
     return 'synced';
   }
+
+  // Vanaf hier: we hebben een bestaand event (ev) en een geldige CalEventId
+  // -> alleen updaten, nooit een nieuw event maken
+
 
   if (fromBatch) {
     const changedFromCalendar = updateSheetFromCalendarIfNeeded_(sheet, row, headers, ev, deadlineVal, startTimeVal, duurUren);
@@ -423,42 +436,6 @@ function getCell(sheet, row, col) {
 function setCell(sheet, row, col, val) {
   if (!col) return;
   sheet.getRange(row, col).setValue(val);
-}
-
-function ensureUniqueEventLink_(sheet, headers, row, eventId) {
-  if (!eventId) return '';
-  const col = headers[HEADER.eventId];
-  if (!col) return '';
-  const normalizedId = normalizeEventId(eventId);
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return eventId;
-
-  const values = sheet.getRange(2, col, lastRow - 1, 1).getValues();
-  const rowsWithId = [];
-  for (let i = 0; i < values.length; i++) {
-    const val = values[i][0];
-    if (!val) continue;
-    const currentNormalized = normalizeEventId(String(val));
-    if (currentNormalized === normalizedId) {
-      rowsWithId.push(i + 2);
-    }
-  }
-
-  if (rowsWithId.length <= 1) return eventId;
-
-  const primaryRow = Math.min.apply(null, rowsWithId);
-  rowsWithId.forEach(r => {
-    if (r !== primaryRow) {
-      setCell(sheet, r, col, '');
-    }
-  });
-
-  if (row === primaryRow) {
-    return eventId;
-  }
-
-  setCell(sheet, row, col, '');
-  return '';
 }
 
 function buildTitle(categorie, omschrijving, toegewezen) {
