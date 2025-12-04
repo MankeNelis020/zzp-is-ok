@@ -324,9 +324,12 @@ function syncRow(sheet, row, headers, options) {
     bedragExcl: bedragExclVal
   });
 
+  const descriptionTimeVal = extractStartTimeFromOmschrijving_(omschrijving);
   let start, end;
   if (startTimeVal) {
     ({ start, end } = parseDeadlineWithDuration_(deadlineVal, startTimeVal, duurMinuten));
+  } else if (descriptionTimeVal) {
+    ({ start, end } = parseDeadlineWithDuration_(deadlineVal, descriptionTimeVal, duurMinuten));
   } else {
     ({ start, end } = findFreeSlotAroundDeadline_(cal, deadlineVal, duurMinuten));
   }
@@ -452,6 +455,17 @@ function buildDescription({ categorie, omschrijving, toegewezen, status, notitie
   parts.push(`Bron: ${SpreadsheetApp.getActiveSpreadsheet().getName()}`);
   parts.push(`Link: ${SpreadsheetApp.getActiveSpreadsheet().getUrl()}`);
   return parts.join('\n');
+}
+
+function extractStartTimeFromOmschrijving_(omschrijving) {
+  if (!omschrijving) return null;
+  const text = omschrijving.toString();
+  const match = text.match(/(?:^|\s)([01]?\d|2[0-3]):([0-5]\d)(?!\d)/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!isFinite(hours) || !isFinite(minutes)) return null;
+  return new Date(0, 0, 0, hours, minutes, 0);
 }
 
 function parseDeadlineWithDuration_(dateVal, timeVal, duurMinuten) {
