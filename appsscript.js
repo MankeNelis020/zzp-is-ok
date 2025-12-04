@@ -261,7 +261,7 @@ function syncRow(sheet, row, headers, options) {
   const duurUrenRaw  = getCell(sheet, row, headers[HEADER.duurUren]);
   const status       = getCell(sheet, row, headers[HEADER.status]);
   const notities     = getCell(sheet, row, headers[HEADER.notities]);
-  const existingEventId = getCell(sheet, row, headers[HEADER.eventId]);
+  let existingEventId = getCell(sheet, row, headers[HEADER.eventId]);
   const reminderDaysOverride = getCell(sheet, row, headers[HEADER.reminderDays]);
   const doneVal      = getCell(sheet, row, headers[HEADER.doneFlag]);
   const cancelledVal = getCell(sheet, row, headers[HEADER.cancelledFlag]);
@@ -296,6 +296,8 @@ function syncRow(sheet, row, headers, options) {
     isDone ||
     isCancelled ||
     DELETE_KEYWORDS.some(k => statusStr.includes(k));
+
+  existingEventId = ensureUniqueEventLink_(sheet, headers, row, existingEventId);
 
   if (shouldDelete) {
     if (existingEventId) {
@@ -343,13 +345,7 @@ function syncRow(sheet, row, headers, options) {
 
   if (existingEventId && !ev) {
     setCell(sheet, row, headers[HEADER.eventId], '');
-  }
-
-  if (!ev) {
-    ev = findExistingEventByTitleAndTime_(cal, title, start, end);
-    if (ev) {
-      setCell(sheet, row, headers[HEADER.eventId], ev.getId());
-    }
+    existingEventId = '';
   }
 
   if (!ev) {
@@ -427,6 +423,42 @@ function getCell(sheet, row, col) {
 function setCell(sheet, row, col, val) {
   if (!col) return;
   sheet.getRange(row, col).setValue(val);
+}
+
+function ensureUniqueEventLink_(sheet, headers, row, eventId) {
+  if (!eventId) return '';
+  const col = headers[HEADER.eventId];
+  if (!col) return '';
+  const normalizedId = normalizeEventId(eventId);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return eventId;
+
+  const values = sheet.getRange(2, col, lastRow - 1, 1).getValues();
+  const rowsWithId = [];
+  for (let i = 0; i < values.length; i++) {
+    const val = values[i][0];
+    if (!val) continue;
+    const currentNormalized = normalizeEventId(String(val));
+    if (currentNormalized === normalizedId) {
+      rowsWithId.push(i + 2);
+    }
+  }
+
+  if (rowsWithId.length <= 1) return eventId;
+
+  const primaryRow = Math.min.apply(null, rowsWithId);
+  rowsWithId.forEach(r => {
+    if (r !== primaryRow) {
+      setCell(sheet, r, col, '');
+    }
+  });
+
+  if (row === primaryRow) {
+    return eventId;
+  }
+
+  setCell(sheet, row, col, '');
+  return '';
 }
 
 function buildTitle(categorie, omschrijving, toegewezen) {
