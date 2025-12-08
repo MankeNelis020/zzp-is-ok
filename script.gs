@@ -1148,7 +1148,7 @@ function checkMailInbox() {
   const openLabel = GmailApp.createLabel(LABEL_OPEN);
 
   threads.forEach(thread => {
-    if (thread.hasLabel(processedLabel)) return;
+    if (threadHasLabel_(thread, processedLabel.getName())) return;
 
     const messages = thread.getMessages();
     const msg = messages[messages.length - 1];
@@ -1202,6 +1202,15 @@ function checkMailInbox() {
     processedLabel.addToThread(thread);
     openLabel.addToThread(thread);
   });
+}
+
+function threadHasLabel_(thread, labelName) {
+  try {
+    return thread.getLabels().some(label => label.getName() === labelName);
+  } catch (e) {
+    Logger.log('Kon labels niet controleren voor thread: ' + e);
+    return false;
+  }
 }
 
 function _debugWhoAmI() {
