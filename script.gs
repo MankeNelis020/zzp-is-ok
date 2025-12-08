@@ -108,6 +108,17 @@ function onEditInstalled(e) {
 
     const firstRow = Math.max(2, e.range.getRow());
     const lastRow = e.range.getRow() + e.range.getNumRows() - 1;
+    // 1) Formules & opmaak van vorige rij kopiëren naar de nieuwe rij
+if (newRow > 2) { // rij 1 = kop, rij 2 = eerste data rij
+  const lastCol   = sheet.getLastColumn();
+  const prevRange = sheet.getRange(newRow - 1, 1, 1, lastCol);
+  const newRange  = sheet.getRange(newRow,     1, 1, lastCol);
+
+  // Kopieer alles (waarden + formules + opmaak) van vorige rij
+  // We overschrijven de relevante cellen zo meteen toch weer met setCell(...)
+  prevRange.copyTo(newRange);
+}
+
 
     for (let r = firstRow; r <= lastRow; r++) {
       const rowVals = sheet.getRange(r, 1, 1, sheet.getLastColumn()).getValues()[0];
@@ -1123,7 +1134,10 @@ function updateGmailForRow_(gmailThreadId, isDone, isCancelled) {
   }
 }
 
-// Mails → Sheet + Calendar
+// 👇 bovenin je script kun je deze constants zetten (of aanpassen aan wat je al had)
+const TASK_QUERY = 'to:nielbaaijens.taken@gmail.com -label:task_processed -in:trash -in:spam';
+const PROCESSED_LABEL_NAME = 'task_processed';
+
 function checkMailInbox() {
   const ss = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(SHEET_NAME);
@@ -1134,52 +1148,92 @@ function checkMailInbox() {
 
   const headers = getHeaderMap(sheet);
   if (!headers) {
-    Logger.log('Kolomkoppen niet gevonden of onvolledig.');
+    Logger.log('Kolomkoppen niet gevonden of onvolledig in sheet "' + SHEET_NAME + '".');
     return;
   }
 
-  const threads = GmailApp.search(TASK_QUERY, 0, MAX_THREADS_PER_RUN);
+  // Gmail: zoek naar threads die aan de taken-query voldoen
+  const threads = GmailApp.search(TASK_QUERY, 0, 20); // max 20 per run, pas aan naar smaak
   if (!threads.length) {
     Logger.log('Geen nieuwe taken-mails gevonden.');
     return;
   }
 
-  const processedLabel = GmailApp.createLabel(LABEL_PROCESSED);
-  const openLabel = GmailApp.createLabel(LABEL_OPEN);
+  const processedLabel = GmailApp.createLabel(PROCESSED_LABEL_NAME);
+
+  const lastCol = sheet.getLastColumn();
 
   threads.forEach(thread => {
-    if (threadHasLabel_(thread, processedLabel.getName())) return;
+    // Sla threads over die al processed zijn (extra safety)
+    if (thread.hasLabel(processedLabel)) {
+      return;
+    }
 
     const messages = thread.getMessages();
-    const msg = messages[messages.length - 1];
+    const msg = messages[messages.length - 1]; // meest recente mail in de thread
 
-    const subject = msg.getSubject() || '(geen onderwerp)';
-    const body = msg.getPlainBody ? msg.getPlainBody() : msg.getBody();
-    const messageDate = msg.getDate();
+    const subject  = msg.getSubject() || '(geen onderwerp)';
+    const from     = msg.getFrom() || '';
+    const body     = msg.getPlainBody ? msg.getPlainBody() : msg.getBody();
+    const mailDate = msg.getDate() || new Date();
+    const threadId = thread.getId();
 
-    const newRow = sheet.getLastRow() + 1;
+    // ---- Nieuwe rij bepalen ----
+    const lastRow = sheet.getLastRow();
+    const newRow  = lastRow + 1;
 
+    // 1) Kopieer vorige rij (formules + opmaak) als er minstens 1 data-rij is
+    //    Rij 1 = headers, dus vanaf rij 2 zijn het data-rijen.
+    if (lastRow >= 2) {
+      const prevRange = sheet.getRange(lastRow, 1, 1, lastCol);
+      const newRange  = sheet.getRange(newRow, 1, 1, lastCol);
+      prevRange.copyTo(newRange); // kopieert ook formules
+    }
+
+    // 2) Nu expliciet de waarden instellen die we willen overschrijven
+
+    // Datum -> maildatum (of vandaag, als je dat liever wilt)
     if (headers[HEADER.deadline]) {
-      setCell(sheet, newRow, headers[HEADER.deadline], messageDate);
+      setCell(sheet, newRow, headers[HEADER.deadline], mailDate);
     }
 
-    // TODO: e-mailadres → klantnaam mapping toevoegen zonder validatie te breken.
-    if (headers[HEADER.toegewezen]) {
-      setCell(sheet, newRow, headers[HEADER.toegewezen], '');
-    }
-
+    // Omschrijving -> MAIL: <subject>
     if (headers[HEADER.omschrijving]) {
       setCell(sheet, newRow, headers[HEADER.omschrijving], 'MAIL: ' + subject);
     }
 
-    if (headers[HEADER.duurUren]) {
-      setCell(sheet, newRow, headers[HEADER.duurUren], 0);
+    // Klant -> laat leeg i.v.m. data-validatie (jij kiest later uit dropdown)
+    if (headers[HEADER.toegewezen]) {
+      setCell(sheet, newRow, headers[HEADER.toegewezen], '');
     }
 
+    // Categorie -> leeg laten (kan later via regex/Administratie ingevuld worden)
+    if (headers[HEADER.categorie]) {
+      setCell(sheet, newRow, headers[HEADER.categorie], '');
+    }
+
+    // Uren -> standaard 0,5 uur
+    if (headers[HEADER.duurUren]) {
+      setCell(sheet, newRow, headers[HEADER.duurUren], 0.5);
+    }
+
+    // Declarabel (Ja/Nee) -> standaard "Ja"
     if (headers[HEADER.prioriteit]) {
       setCell(sheet, newRow, headers[HEADER.prioriteit], 'Ja');
     }
 
+    // Uurtarief / Bedrag excl. btw -> formules doen hun werk,
+    // maar als ze niet via formule lopen laat je ze hier leeg.
+    if (headers[HEADER.budget]) {
+      // NIETS zetten = formule blijft, of jij vult later handmatig
+      // setCell(sheet, newRow, headers[HEADER.budget], '');
+    }
+    if (headers[HEADER.bedragExcl]) {
+      // idem
+      // setCell(sheet, newRow, headers[HEADER.bedragExcl], '');
+    }
+
+    // Done? / Geannuleerd? -> reset naar FALSE
     if (headers[HEADER.doneFlag]) {
       setCell(sheet, newRow, headers[HEADER.doneFlag], false);
     }
@@ -1187,20 +1241,39 @@ function checkMailInbox() {
       setCell(sheet, newRow, headers[HEADER.cancelledFlag], false);
     }
 
-    if (headers[HEADER.notities]) {
-      const snippet = body ? body.substring(0, 1000) : '';
-      setCell(sheet, newRow, headers[HEADER.notities], snippet);
+    // CalEventId / CalendarIdUsed -> leegmaken (nieuwe koppeling)
+    if (headers[HEADER.eventId]) {
+      setCell(sheet, newRow, headers[HEADER.eventId], '');
+    }
+    if (headers[HEADER.calendarIdUsed]) {
+      setCell(sheet, newRow, headers[HEADER.calendarIdUsed], '');
     }
 
+    // Sync-status -> leeg; wordt door syncRow gezet
+    try {
+      const syncStatusCol = sheet.getRange(SYNC_STATUS_COLUMN + '1').getColumn();
+      sheet.getRange(newRow, syncStatusCol).clearContent();
+    } catch (e) {
+      Logger.log('Kon sync-statuskolom niet leegmaken: ' + e);
+    }
+
+    // GmailThreadId -> koppeling naar deze mail-thread
     if (headers[HEADER.gmailThreadId]) {
-      setCell(sheet, newRow, headers[HEADER.gmailThreadId], thread.getId());
+      setCell(sheet, newRow, headers[HEADER.gmailThreadId], threadId);
     }
 
-    const result = syncRow(sheet, newRow, headers, { source: 'manual' });
-    Logger.log('Mail-thread ' + thread.getId() + ' → nieuwe rij ' + newRow + ' → syncResult: ' + result);
+    // 3) Event direct syncen naar Calendar
+    const syncResult = syncRow(sheet, newRow, headers, { source: 'manual' });
+    Logger.log(
+      'Mail-thread ' + threadId +
+      ' → nieuwe rij ' + newRow +
+      ' → syncResult: ' + syncResult
+    );
 
+    // 4) Thread markeren als processed (en optioneel archiveren)
     processedLabel.addToThread(thread);
-    openLabel.addToThread(thread);
+    // Als je wilt dat deze mails direct uit je inbox verdwijnen:
+    // thread.moveToArchive();
   });
 }
 
