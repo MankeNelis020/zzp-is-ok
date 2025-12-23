@@ -9,6 +9,17 @@ const LOG_END_LOCAL = '2025-03-18 07:30';   // Logging window end (local time)
 const LOCAL_TIMEZONE = 'Europe/Amsterdam';   // Timezone used for logging window and display
 
 /**
+ * Optional body signature check configuration.
+ * When SIGNATURE_CHECK_ENABLED is true and an expected string exists for the URL,
+ * body_signature_ok will be set to true/false based on a case-insensitive match.
+ */
+const SIGNATURE_CHECK_ENABLED = true; // Set to false to disable signature checks entirely
+const EXPECTED_STRING_MAP = {
+  'https://www.leidscongresbureau.nl/': 'wp-content',
+  'https://www.pitactief.nl/': 'wp-content',
+};
+
+/**
  * Entry point: checks both sites and appends logs when within the configured window.
  */
 function runWebsiteCheck() {
@@ -108,62 +119,43 @@ function fetchUrlWithMetrics(url) {
   let retryAfter = '';
   let locationHeader = '';
   let bodySignatureOk = '';
+  let xPoweredBy = '';
 
   if (response) {
     status = response.getResponseCode();
     statusClass = getStatusClass(status);
     success = status >= 200 && status < 300;
     headers = response.getAllHeaders() || {};
+    const normalizedHeaders = normalizeHeaders(headers);
 
     const contentBytes = response.getContent();
     responseSizeBytes = contentBytes ? contentBytes.length : '';
     const bodyText = response.getContentText();
     if (status === 200 && bodyText) {
       bodySample200 = bodyText.replace(/\s+/g, ' ').substring(0, 200);
-      bodySignatureOk = true;
+      bodySignatureOk = computeSignatureCheck(url, bodyText);
     }
 
-    redirectLocation = headers['Location'] || headers['location'] || '';
-    contentType = headers['Content-Type'] || headers['content-type'] || '';
-    server = headers['Server'] || headers['server'] || '';
-    dateHeader = headers['Date'] || headers['date'] || '';
-    cacheControl = headers['Cache-Control'] || headers['cache-control'] || '';
-    expires = headers['Expires'] || headers['expires'] || '';
-    age = headers['Age'] || headers['age'] || '';
-    via = headers['Via'] || headers['via'] || '';
-    xCache = headers['X-Cache'] || headers['x-cache'] || '';
-    xServedBy = headers['X-Served-By'] || headers['x-served-by'] || '';
-    xTimer = headers['X-Timer'] || headers['x-timer'] || '';
-    xRequestId = headers['X-Request-Id'] || headers['x-request-id'] || '';
-    cfRay = headers['CF-RAY'] || headers['cf-ray'] || '';
-    cfCacheStatus = headers['CF-Cache-Status'] || headers['cf-cache-status'] || '';
-    retryAfter = headers['Retry-After'] || headers['retry-after'] || '';
-    locationHeader = headers['Location'] || headers['location'] || '';
+    redirectLocation = normalizedHeaders['location'] || '';
+    contentType = normalizedHeaders['content-type'] || '';
+    server = normalizedHeaders['server'] || '';
+    dateHeader = normalizedHeaders['date'] || '';
+    cacheControl = normalizedHeaders['cache-control'] || '';
+    expires = normalizedHeaders['expires'] || '';
+    age = normalizedHeaders['age'] || '';
+    via = normalizedHeaders['via'] || '';
+    xCache = normalizedHeaders['x-cache'] || '';
+    xServedBy = normalizedHeaders['x-served-by'] || '';
+    xTimer = normalizedHeaders['x-timer'] || '';
+    xRequestId = normalizedHeaders['x-request-id'] || '';
+    cfRay = normalizedHeaders['cf-ray'] || '';
+    cfCacheStatus = normalizedHeaders['cf-cache-status'] || '';
+    retryAfter = normalizedHeaders['retry-after'] || '';
+    locationHeader = normalizedHeaders['location'] || '';
+    xPoweredBy = normalizedHeaders['x-powered-by'] || '';
   }
 
-  const reservedKeys = new Set([
-    'Server', 'server', 'Date', 'date', 'Cache-Control', 'cache-control', 'Expires', 'expires',
-    'Age', 'age', 'Via', 'via', 'X-Cache', 'x-cache', 'X-Served-By', 'x-served-by',
-    'X-Timer', 'x-timer', 'X-Request-Id', 'x-request-id', 'CF-RAY', 'cf-ray',
-    'CF-Cache-Status', 'cf-cache-status', 'Retry-After', 'retry-after', 'Location', 'location',
-    'Content-Type', 'content-type'
-  ]);
-
-  const otherHeaders = {};
-  Object.keys(headers).forEach((key) => {
-    if (!reservedKeys.has(key)) {
-      otherHeaders[key] = headers[key];
-    }
-  });
-  let otherHeadersJson = '';
-  try {
-    otherHeadersJson = JSON.stringify(otherHeaders);
-    if (otherHeadersJson.length > 2000) {
-      otherHeadersJson = otherHeadersJson.substring(0, 2000);
-    }
-  } catch (err) {
-    otherHeadersJson = '';
-  }
+  const otherHeadersJson = buildOtherHeadersJson(headers);
 
   return {
     sheetName: url.indexOf('leidscongresbureau') !== -1 ? 'Logs_leidscongresbureau' : 'Logs_pitactief',
@@ -199,6 +191,7 @@ function fetchUrlWithMetrics(url) {
       cfCacheStatus,
       retryAfter,
       locationHeader,
+      xPoweredBy,
       otherHeadersJson,
     ],
   };
@@ -231,7 +224,7 @@ function ensureHeaders(sheet) {
     'error_type', 'error_message', 'redirect_location', 'body_signature_ok', 'body_sample_200',
     'content_type', 'server_header', 'date_header', 'cache_control', 'expires', 'age',
     'via_header', 'x_cache', 'x_served_by', 'x_timer', 'x_request_id', 'cf_ray',
-    'cf_cache_status', 'retry_after', 'location_header', 'other_headers_json_compact'
+    'cf_cache_status', 'retry_after', 'location_header', 'x_powered_by', 'other_headers_json_compact'
   ];
 
   const current = sheet.getRange(1, 1, 1, headers.length).getValues()[0];
@@ -253,6 +246,80 @@ function getStatusClass(status) {
   if (status >= 400 && status < 500) return '4xx';
   if (status >= 500 && status < 600) return '5xx';
   return '';
+}
+
+/**
+ * Normalize headers to a lowercase key map for consistent lookups.
+ * @param {Object} headers
+ * @returns {Object}
+ */
+function normalizeHeaders(headers) {
+  const normalized = {};
+  Object.keys(headers || {}).forEach((key) => {
+    const lower = key.toLowerCase();
+    if (!normalized[lower]) {
+      normalized[lower] = headers[key];
+    }
+  });
+  return normalized;
+}
+
+/**
+ * Computes the optional body signature check result.
+ * Returns '' when disabled or when no expected string exists for the URL.
+ * @param {string} url
+ * @param {string} bodyText
+ * @returns {boolean|string}
+ */
+function computeSignatureCheck(url, bodyText) {
+  if (!SIGNATURE_CHECK_ENABLED) {
+    return '';
+  }
+  const expected = EXPECTED_STRING_MAP[url];
+  if (!expected) {
+    return '';
+  }
+  const haystack = bodyText.toLowerCase().substring(0, 5000);
+  const needle = String(expected).toLowerCase();
+  return haystack.indexOf(needle) !== -1;
+}
+
+/**
+ * Builds a compact JSON of remaining headers after filtering reserved and sensitive ones.
+ * @param {Object} headers
+ * @returns {string}
+ */
+function buildOtherHeadersJson(headers) {
+  const reservedLower = new Set([
+    'server', 'date', 'cache-control', 'expires', 'age', 'via', 'x-cache', 'x-served-by',
+    'x-timer', 'x-request-id', 'cf-ray', 'cf-cache-status', 'retry-after', 'location',
+    'content-type', 'x-powered-by'
+  ]);
+
+  const excludedLower = new Set([
+    'report-to', 'nel', 'cf-nel', 'set-cookie', 'permissions-policy', 'cookie',
+    'authorization', 'proxy-authorization'
+  ]);
+
+  const otherHeaders = {};
+  Object.keys(headers || {}).forEach((key) => {
+    const lower = key.toLowerCase();
+    if (reservedLower.has(lower)) return;
+    if (excludedLower.has(lower)) return;
+    otherHeaders[key] = headers[key];
+  });
+
+  let otherHeadersJson = '';
+  try {
+    otherHeadersJson = JSON.stringify(otherHeaders);
+    const limit = 1800; // within 1500-2000 chars requirement
+    if (otherHeadersJson.length > limit) {
+      otherHeadersJson = otherHeadersJson.substring(0, limit) + '...truncated';
+    }
+  } catch (err) {
+    otherHeadersJson = '';
+  }
+  return otherHeadersJson;
 }
 
 /**
