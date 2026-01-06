@@ -27,25 +27,32 @@ const EXPECTED_STRING_MAP = {
 };
 
 /**
- * Entry point: checks both sites and appends logs when within the configured window.
+ * List of URLs to check and their target sheets.
+ */
+const URL_CONFIG = [
+  { url: 'https://www.leidscongresbureau.nl/', sheet: 'Logs_leidscongresbureau' },
+  { url: 'https://www.pitactief.nl/', sheet: 'Logs_pitactief' },
+];
+
+/**
+ * Entry point: checks configured sites and appends logs when within the configured window.
  */
 function runWebsiteCheck() {
- const now = new Date();
- if (!isWithinLoggingWindow(now)) {
+  const now = new Date();
+  if (!isWithinLoggingWindow(now)) {
     return;
   }
 
   const runId = Utilities.getUuid();
-  const urls = [
-    { url: 'https://www.leidscongresbureau.nl/', sheet: 'Logs_leidscongresbureau' },
-    { url: 'https://www.pitactief.nl/', sheet: 'Logs_pitactief' },
-  ];
+  const urls = URL_CONFIG || [];
 
-  const rows = urls.map((item) => {
-    const result = fetchUrlWithMetrics(item.url);
-    result.values[0] = runId;
-    return result;
-  });
+  const rows = urls
+    .filter((item) => item && item.url)
+    .map((item) => {
+      const result = fetchUrlWithMetrics(item.url, item.sheet);
+      result.values[0] = runId;
+      return result;
+    });
 
   rows.forEach((row) => {
     appendRows(row.sheetName, [row.values]);
@@ -100,9 +107,10 @@ function parseLocalDateTime(localDateString) {
 /**
  * Performs an HTTP fetch with metrics and structured logging fields.
  * @param {string} url
+ * @param {string} sheetName
  * @returns {{sheetName: string, values: any[]}}
  */
-function fetchUrlWithMetrics(url) {
+function fetchUrlWithMetrics(url, sheetName) {
   const started = Date.now();
   let response = null;
   let errorType = '';
@@ -198,7 +206,11 @@ function fetchUrlWithMetrics(url) {
   const otherHeadersJson = buildOtherHeadersJson(headers);
 
   return {
-    sheetName: url.indexOf('leidscongresbureau') !== -1 ? 'Logs_leidscongresbureau' : 'Logs_pitactief',
+    sheetName:
+      sheetName ||
+      (url.indexOf('leidscongresbureau') !== -1
+        ? 'Logs_leidscongresbureau'
+        : 'Logs_pitactief'),
     values: [
       '', // run_id placeholder; filled in caller
       nowUtc,

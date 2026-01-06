@@ -13,6 +13,10 @@ Dit project bevat een Apps Script dat twee websites (leidscongresbureau en pitac
 Bovenaan `apps-script.js` staan de enige bron van waarheid voor de logvensters rond geplande e-mails:
 ```javascript
 const LOCAL_TIMEZONE = 'Europe/Amsterdam'; // Timezone for logging window
+const URL_CONFIG = [
+  { url: 'https://www.leidscongresbureau.nl/', sheet: 'Logs_leidscongresbureau' },
+  { url: 'https://www.pitactief.nl/', sheet: 'Logs_pitactief' },
+];
 const EMAIL_SCHEDULE_LOCAL = [
   // Add one entry per geplande e-mail. Tijden in lokale tijdzone (yyyy-MM-dd HH:mm).
   { name: 'Campagne A', sendAt: '2025-03-18 06:00' },
@@ -26,6 +30,7 @@ const EXPECTED_STRING_MAP = {
   'https://www.pitactief.nl/': 'wp-content',
 };
 ```
+Pas `URL_CONFIG` aan om extra sites toe te voegen; geef per URL de doel-tab door (wordt automatisch aangemaakt als die nog niet bestaat).
 Vul `EMAIL_SCHEDULE_LOCAL` met alle geplande e-mails. Voor elke geplande `sendAt` wordt een logvenster geopend van `LOG_WINDOW_LEAD_MINUTES` minuten vóór tot `LOG_WINDOW_LAG_MINUTES` minuten ná de verzendtijd. Buiten deze vensters wordt niets gelogd.
 
 Zet `SIGNATURE_CHECK_ENABLED` op `false` om de body-signaturecheck volledig uit te schakelen. Laat hem op `true` en pas `EXPECTED_STRING_MAP` aan als je per URL een andere verwachte substring (case-insensitive, op de eerste 5000 chars) wilt controleren.
