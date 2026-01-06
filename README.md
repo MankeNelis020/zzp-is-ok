@@ -1,6 +1,6 @@
 # Website logging via Google Sheets + Apps Script
 
-Dit project bevat een Apps Script dat twee websites (leidscongresbureau en pitactief) elke minuut logt in een Google Spreadsheet, maar **uitsluitend** binnen een hard gedefinieerd logvenster.
+Dit project bevat een Apps Script dat twee websites (leidscongresbureau en pitactief) elke minuut logt in een Google Spreadsheet, maar **uitsluitend** binnen hard gedefinieerde logvensters rondom geplande e-mailverzendingen.
 
 ## Installatie
 1. Maak of open een Google Spreadsheet en geef het een naam.
@@ -10,18 +10,23 @@ Dit project bevat een Apps Script dat twee websites (leidscongresbureau en pitac
 5. Gebruik **Monitoring → Run now** voor een directe handmatige run.
 
 ## Logvenster instellen
-Bovenaan `apps-script.js` staan de enige bron van waarheid voor het logvenster:
+Bovenaan `apps-script.js` staan de enige bron van waarheid voor de logvensters rond geplande e-mails:
 ```javascript
-const LOG_START_LOCAL = '2025-03-18 05:00'; // Logging window start (local time)
-const LOG_END_LOCAL   = '2025-03-18 07:30'; // Logging window end (local time)
-const LOCAL_TIMEZONE  = 'Europe/Amsterdam'; // Timezone for logging window
+const LOCAL_TIMEZONE = 'Europe/Amsterdam'; // Timezone for logging window
+const EMAIL_SCHEDULE_LOCAL = [
+  // Add one entry per geplande e-mail. Tijden in lokale tijdzone (yyyy-MM-dd HH:mm).
+  { name: 'Campagne A', sendAt: '2025-03-18 06:00' },
+  { name: 'Campagne B', sendAt: '2025-03-18 12:00' },
+];
+const LOG_WINDOW_LEAD_MINUTES = 30; // Start logging deze minuten vóór de verzendtijd
+const LOG_WINDOW_LAG_MINUTES = 60;  // Stop logging deze minuten ná de verzendtijd
 const SIGNATURE_CHECK_ENABLED = true; // Enable/disable body signature check
 const EXPECTED_STRING_MAP = {
   'https://www.leidscongresbureau.nl/': 'wp-content',
   'https://www.pitactief.nl/': 'wp-content',
 };
 ```
-Pas deze drie constanten aan om het gewenste start- en eindmoment (in lokale tijd) te bepalen; buiten dit venster wordt niets gelogd.
+Vul `EMAIL_SCHEDULE_LOCAL` met alle geplande e-mails. Voor elke geplande `sendAt` wordt een logvenster geopend van `LOG_WINDOW_LEAD_MINUTES` minuten vóór tot `LOG_WINDOW_LAG_MINUTES` minuten ná de verzendtijd. Buiten deze vensters wordt niets gelogd.
 
 Zet `SIGNATURE_CHECK_ENABLED` op `false` om de body-signaturecheck volledig uit te schakelen. Laat hem op `true` en pas `EXPECTED_STRING_MAP` aan als je per URL een andere verwachte substring (case-insensitive, op de eerste 5000 chars) wilt controleren.
 

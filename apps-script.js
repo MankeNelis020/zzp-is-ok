@@ -1,12 +1,19 @@
 /**
  * Google Apps Script: Website logging tool for Sheets
  *
- * Configure the logging window here. Logging only occurs when the current local time
- * (in LOCAL_TIMEZONE) is between LOG_START_LOCAL and LOG_END_LOCAL (inclusive).
+ * Configure the logging windows here. Logging only occurs when the current local time
+ * (in LOCAL_TIMEZONE) is within any derived window around a scheduled email send.
+ * Each email window runs from LOG_WINDOW_LEAD_MINUTES before the scheduled send
+ * until LOG_WINDOW_LAG_MINUTES after it.
  */
-const LOG_START_LOCAL = '2025-03-18 05:00'; // Logging window start (local time)
-const LOG_END_LOCAL = '2025-03-18 07:30';   // Logging window end (local time)
-const LOCAL_TIMEZONE = 'Europe/Amsterdam';   // Timezone used for logging window and display
+const LOCAL_TIMEZONE = 'Europe/Amsterdam'; // Timezone used for logging window and display
+const EMAIL_SCHEDULE_LOCAL = [
+  // Add one entry per geplande e-mail. Tijden in lokale tijdzone (yyyy-MM-dd HH:mm).
+  { name: 'Campagne A', sendAt: '2025-03-18 06:00' },
+  { name: 'Campagne B', sendAt: '2025-03-18 12:00' },
+];
+const LOG_WINDOW_LEAD_MINUTES = 30; // Start logging deze minuten vóór de verzendtijd
+const LOG_WINDOW_LAG_MINUTES = 60;  // Stop logging deze minuten ná de verzendtijd
 
 /**
  * Optional body signature check configuration.
@@ -23,8 +30,8 @@ const EXPECTED_STRING_MAP = {
  * Entry point: checks both sites and appends logs when within the configured window.
  */
 function runWebsiteCheck() {
-  const now = new Date();
-  if (!isWithinLoggingWindow(now)) {
+ const now = new Date();
+ if (!isWithinLoggingWindow(now)) {
     return;
   }
 
@@ -51,10 +58,43 @@ function runWebsiteCheck() {
  * @returns {boolean}
  */
 function isWithinLoggingWindow(now) {
-  const nowLocal = Utilities.formatDate(now, LOCAL_TIMEZONE, 'yyyy-MM-dd HH:mm');
-  const startLocal = LOG_START_LOCAL;
-  const endLocal = LOG_END_LOCAL;
-  return nowLocal >= startLocal && nowLocal <= endLocal;
+  const schedule = EMAIL_SCHEDULE_LOCAL || [];
+  const nowMs = now.getTime();
+
+  for (let i = 0; i < schedule.length; i++) {
+    const entry = schedule[i];
+    if (!entry || !entry.sendAt) {
+      continue;
+    }
+    const sendDate = parseLocalDateTime(entry.sendAt);
+    if (!sendDate) {
+      continue;
+    }
+    const windowStart = new Date(
+      sendDate.getTime() - LOG_WINDOW_LEAD_MINUTES * 60 * 1000
+    );
+    const windowEnd = new Date(
+      sendDate.getTime() + LOG_WINDOW_LAG_MINUTES * 60 * 1000
+    );
+    if (nowMs >= windowStart.getTime() && nowMs <= windowEnd.getTime()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Parse a local datetime string (yyyy-MM-dd HH:mm) into a Date in the configured timezone.
+ * Returns null on parse failure.
+ * @param {string} localDateString
+ * @returns {Date|null}
+ */
+function parseLocalDateTime(localDateString) {
+  try {
+    return Utilities.parseDate(localDateString, LOCAL_TIMEZONE, 'yyyy-MM-dd HH:mm');
+  } catch (err) {
+    return null;
+  }
 }
 
 /**
